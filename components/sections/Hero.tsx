@@ -110,21 +110,8 @@ export function Hero() {
         </motion.div>
 
         <div className="relative z-10 h-[44vh] min-h-[320px] w-full sm:h-[52vh] lg:h-[76vh]">
-          <div className="absolute inset-0 [mask-image:radial-gradient(circle_at_50%_50%,black_58%,transparent_88%)]">
+          <div className="absolute inset-0 [mask-image:radial-gradient(circle_at_50%_50%,black_66%,transparent_96%)]">
             <CoreCanvas />
-          </div>
-
-          <div className="pointer-events-none absolute left-2 top-6 hidden lg:block">
-            <div className="mono text-[0.62rem] leading-relaxed tracking-[0.2em] text-cyan/60">
-              <div>GATEWAY // NEXORA-CORE</div>
-              <div className="text-violet/60">ROUTER // nexora-auto</div>
-            </div>
-          </div>
-          <div className="pointer-events-none absolute bottom-16 right-2 hidden text-right lg:block">
-            <div className="mono text-[0.62rem] leading-relaxed tracking-[0.2em] text-muted">
-              <div>MULTIMODAL BUS</div>
-              <div className="text-cyan/60">STATUS: NOMINAL</div>
-            </div>
           </div>
         </div>
       </div>

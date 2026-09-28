@@ -9,11 +9,17 @@ const CoreScene = dynamic(() => import("@/components/three/CoreScene"), {
   loading: () => <CoreFallback />,
 });
 
+const VIDEO_SRC = "/nexora-reactor.mp4";
+const POSTER = "/reactor.webp";
+
 /**
- * Static reactor fallback. Rendered before hydration, when WebGL is unavailable,
- * when reduced motion is requested, and after a context loss.
+ * Graceful reactor fallback. Rendered before hydration, when WebGL is unavailable,
+ * when reduced motion is requested, after a context loss, and when the video
+ * itself cannot be decoded — degrading to the static reactor render.
  */
 export function CoreFallback() {
+  const [failed, setFailed] = useState(false);
+
   return (
     <div className="relative h-full w-full overflow-hidden" aria-hidden>
       <div
@@ -27,14 +33,28 @@ export function CoreFallback() {
       <div className="absolute inset-0 grid place-items-center">
         <div className="relative h-[84%] max-h-full">
           <div className="absolute inset-[-16%] rounded-[50%] bg-[radial-gradient(closest-side,rgba(0,240,255,0.22),rgba(112,0,255,0.16),transparent)] blur-2xl" />
-          <img
-            src="/reactor.webp"
-            alt=""
-            width={788}
-            height={1400}
-            decoding="async"
-            className="mesh-drift-slow relative h-full w-auto object-contain drop-shadow-[0_0_60px_rgba(0,240,255,0.35)]"
-          />
+          {failed ? (
+            <img
+              src={POSTER}
+              alt=""
+              width={788}
+              height={1400}
+              decoding="async"
+              className="mesh-drift-slow relative h-full w-auto object-contain drop-shadow-[0_0_60px_rgba(0,240,255,0.35)]"
+            />
+          ) : (
+            <video
+              className="relative h-full w-auto max-w-full object-contain drop-shadow-[0_0_60px_rgba(0,240,255,0.35)]"
+              src={VIDEO_SRC}
+              poster={POSTER}
+              autoPlay
+              loop
+              muted
+              playsInline
+              preload="metadata"
+              onError={() => setFailed(true)}
+            />
+          )}
         </div>
       </div>
     </div>
@@ -46,8 +66,14 @@ export function CoreCanvas() {
   const webgl = useWebGLAvailable();
   const reduce = usePrefersReducedMotion();
   const [contextLost, setContextLost] = useState(false);
+  const [videoFailed, setVideoFailed] = useState(false);
 
   if (!ready || webgl === null) return <CoreFallback />;
-  if (!webgl || reduce || contextLost) return <CoreFallback />;
-  return <CoreScene onContextLost={() => setContextLost(true)} />;
+  if (!webgl || reduce || contextLost || videoFailed) return <CoreFallback />;
+  return (
+    <CoreScene
+      onContextLost={() => setContextLost(true)}
+      onVideoError={() => setVideoFailed(true)}
+    />
+  );
 }
