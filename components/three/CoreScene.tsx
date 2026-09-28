@@ -4,10 +4,10 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import * as THREE from "three";
 
-const VIDEO_SRC = "/nexora-reactor.mp4";
+const VIDEO_SRC = "/nexora-reactor-square.mp4";
 const CYAN = "#00f0ff";
 const VIOLET = "#7000ff";
-const DEFAULT_ASPECT = 788 / 1400;
+const DEFAULT_ASPECT = 1;
 
 type Interaction = {
   dragX: number;
@@ -234,8 +234,8 @@ function SceneContents({
   const { viewport } = useThree();
   const { texture, aspect } = useVideoTexture(onVideoError);
 
-  const fitH = viewport.height * 0.86;
-  const fitW = viewport.width * 0.9;
+  const fitH = viewport.height * 0.92;
+  const fitW = viewport.width * 0.94;
   const h = Math.min(fitH, fitW / aspect);
   const w = h * aspect;
 
