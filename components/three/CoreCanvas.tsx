@@ -40,11 +40,11 @@ export function CoreFallback() {
               width={788}
               height={1400}
               decoding="async"
-              className="mesh-drift-slow relative h-full w-full object-contain drop-shadow-[0_0_60px_rgba(0,240,255,0.35)]"
+              className="mesh-drift-slow relative h-full w-full object-contain mix-blend-screen drop-shadow-[0_0_60px_rgba(0,240,255,0.35)]"
             />
           ) : (
             <video
-              className="relative h-full w-full object-contain drop-shadow-[0_0_60px_rgba(0,240,255,0.35)]"
+              className="relative h-full w-full object-contain mix-blend-screen drop-shadow-[0_0_60px_rgba(0,240,255,0.35)]"
               src={VIDEO_SRC}
               poster={POSTER}
               autoPlay

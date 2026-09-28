@@ -5,8 +5,6 @@ import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } 
 import * as THREE from "three";
 
 const VIDEO_SRC = "/nexora-reactor-square.mp4";
-const CYAN = "#00f0ff";
-const VIOLET = "#7000ff";
 const DEFAULT_ASPECT = 1;
 
 type Interaction = {
@@ -20,6 +18,92 @@ type Interaction = {
 };
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+
+/**
+ * The reactor plane. Video colour is kept raw in the GPU texture and the dark
+ * background is removed per-pixel in the fragment stage. Screen-space normals
+ * derived from luminance give the flat plane subtle 3D shading, so the object
+ * reads as lit volume without ever rotating its rectangular boundary into view.
+ */
+const reactorVertex = /* glsl */ `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+
+const reactorFragment = /* glsl */ `
+  uniform sampler2D uMap;
+  uniform vec2 uTexel;
+  uniform float uTime;
+  uniform float uLow;
+  uniform float uHigh;
+  uniform float uBump;
+  varying vec2 vUv;
+
+  float reactorLuma(vec3 c) {
+    return dot(c, vec3(0.299, 0.587, 0.114));
+  }
+
+  void main() {
+    vec3 rgb = texture2D(uMap, vUv).rgb;
+    float l = reactorLuma(rgb);
+    float mx = max(rgb.r, max(rgb.g, rgb.b));
+    float mn = min(rgb.r, min(rgb.g, rgb.b));
+    float chroma = mx - mn;
+
+    // Estimate the flat backdrop from the frame corners, trusting only a dark
+    // one. If the corners are bright there is no dark background to remove.
+    vec3 c0 = texture2D(uMap, vec2(0.03, 0.03)).rgb;
+    vec3 c1 = texture2D(uMap, vec2(0.97, 0.03)).rgb;
+    vec3 c2 = texture2D(uMap, vec2(0.03, 0.97)).rgb;
+    vec3 c3 = texture2D(uMap, vec2(0.97, 0.97)).rgb;
+    vec3 bg = c0;
+    if (reactorLuma(c1) < reactorLuma(bg)) bg = c1;
+    if (reactorLuma(c2) < reactorLuma(bg)) bg = c2;
+    if (reactorLuma(c3) < reactorLuma(bg)) bg = c3;
+    float bgDark = 1.0 - smoothstep(0.14, 0.34, reactorLuma(bg));
+    vec3 key = mix(vec3(0.0), bg, bgDark);
+
+    // Anything close to the backdrop becomes transparent, so black and dark
+    // navy alike disappear; whatever differs visually survives. Soft edge, no
+    // hard rectangle.
+    float dist = length(rgb - key);
+    float alpha = smoothstep(uLow, uHigh, dist);
+
+    // Keep bright cyan / blue / violet emissive details.
+    float emissive = smoothstep(0.32, 0.6, l) * smoothstep(0.05, 0.22, chroma);
+    alpha = clamp(max(alpha, emissive), 0.0, 1.0);
+
+    // Screen-space normals from the luminance field: cheap embossed lighting.
+    vec2 t = uTexel * 2.0;
+    float hl = reactorLuma(texture2D(uMap, vUv - vec2(t.x, 0.0)).rgb);
+    float hr = reactorLuma(texture2D(uMap, vUv + vec2(t.x, 0.0)).rgb);
+    float hd = reactorLuma(texture2D(uMap, vUv - vec2(0.0, t.y)).rgb);
+    float hu = reactorLuma(texture2D(uMap, vUv + vec2(0.0, t.y)).rgb);
+    vec3 N = normalize(vec3((hl - hr) * uBump, (hd - hu) * uBump, 1.0));
+
+    vec3 L1 = normalize(vec3(-0.42, 0.55, 0.72));
+    vec3 L2 = normalize(vec3(0.5, -0.35, 0.79));
+    vec3 V = vec3(0.0, 0.0, 1.0);
+    float d1 = max(dot(N, L1), 0.0);
+    float d2 = max(dot(N, L2), 0.0);
+    float s1 = pow(max(dot(reflect(-L1, N), V), 0.0), 30.0);
+    float s2 = pow(max(dot(reflect(-L2, N), V), 0.0), 30.0);
+
+    vec3 cyan = vec3(0.0, 0.94, 1.0);
+    vec3 violet = vec3(0.44, 0.0, 1.0);
+
+    vec3 col = rgb * (0.86 + 0.26 * d1 + 0.2 * d2);
+    col += cyan * s1 * 0.3 + violet * s2 * 0.26;
+    float rim = pow(1.0 - clamp(N.z, 0.0, 1.0), 2.5);
+    col += (cyan + violet) * 0.5 * rim * 0.2;
+    col *= 1.0 + 0.015 * sin(uTime * 0.9);
+
+    gl_FragColor = vec4(col, alpha);
+  }
+`;
 
 const auraVertex = /* glsl */ `
   varying vec2 vUv;
@@ -42,20 +126,23 @@ const auraFragment = /* glsl */ `
     float halo = pow(core, 2.2);
     float pulse = 0.5 + 0.5 * sin(uTime * 0.9);
     vec3 col = mix(uColorB, uColorA, clamp(core * 1.3, 0.0, 1.0));
-    float alpha = halo * (0.32 + 0.26 * pulse);
+    float alpha = halo * (0.3 + 0.26 * pulse);
     gl_FragColor = vec4(col, alpha);
   }
 `;
 
-/**
- * Streams the reactor video into a GPU texture, keeping a stable aspect ratio
- * and surfacing load failures so the caller can fall back gracefully.
- */
+/** Streams the square reactor video into a GPU texture, reading its real aspect. */
 function useVideoTexture(onError?: () => void) {
-  const [state, setState] = useState<{ texture: THREE.VideoTexture | null; aspect: number }>({
+  const [state, setState] = useState<{
+    texture: THREE.VideoTexture | null;
+    aspect: number;
+    texel: THREE.Vector2;
+  }>({
     texture: null,
     aspect: DEFAULT_ASPECT,
+    texel: new THREE.Vector2(1 / 720, 1 / 720),
   });
+  const ref = useRef<THREE.VideoTexture | null>(null);
   const errorRef = useRef(onError);
   errorRef.current = onError;
 
@@ -77,16 +164,17 @@ function useVideoTexture(onError?: () => void) {
 
     const ready = () => {
       if (!active || texture) return;
-      const aspect =
-        video.videoWidth && video.videoHeight
-          ? video.videoWidth / video.videoHeight
-          : DEFAULT_ASPECT;
+      const w = video.videoWidth || 720;
+      const h = video.videoHeight || 720;
       texture = new THREE.VideoTexture(video);
-      texture.colorSpace = THREE.SRGBColorSpace;
+      // Raw colour data: the shader consumes it directly and writes the final
+      // pixels, so no sRGB decode/encode is applied around it.
+      texture.colorSpace = THREE.NoColorSpace;
       texture.minFilter = THREE.LinearFilter;
       texture.magFilter = THREE.LinearFilter;
       texture.generateMipmaps = false;
-      setState({ texture, aspect });
+      ref.current = texture;
+      setState({ texture, aspect: w / h, texel: new THREE.Vector2(1 / w, 1 / h) });
     };
 
     const failed = () => {
@@ -106,18 +194,19 @@ function useVideoTexture(onError?: () => void) {
       active = false;
       video.removeEventListener("loadeddata", ready);
       video.removeEventListener("canplay", ready);
-      video.removeEventListener("error", failed);
+      video.removeEventListener("error", ready);
       video.pause();
       video.removeAttribute("src");
       video.load();
       texture?.dispose();
+      ref.current = null;
     };
   }, []);
 
   return state;
 }
 
-/** Soft cyan/violet atmosphere that breathes behind the reactor. */
+/** Soft cyan/violet atmosphere behind the reactor; its edges fade to nothing. */
 function Aura({ w, h }: { w: number; h: number }) {
   const material = useRef<THREE.ShaderMaterial>(null);
   const mesh = useRef<THREE.Mesh>(null);
@@ -126,8 +215,8 @@ function Aura({ w, h }: { w: number; h: number }) {
     () => ({
       uTime: { value: 0 },
       uAspect: { value: w / h },
-      uColorA: { value: new THREE.Color(CYAN) },
-      uColorB: { value: new THREE.Color(VIOLET) },
+      uColorA: { value: new THREE.Color("#00f0ff") },
+      uColorB: { value: new THREE.Color("#7000ff") },
     }),
     [w, h],
   );
@@ -135,15 +224,12 @@ function Aura({ w, h }: { w: number; h: number }) {
   useFrame((state) => {
     const t = state.clock.elapsedTime;
     if (material.current) material.current.uniforms.uTime.value = t;
-    if (mesh.current) {
-      const pulse = 1 + Math.sin(t * 0.9) * 0.03;
-      mesh.current.scale.setScalar(pulse);
-    }
+    if (mesh.current) mesh.current.scale.setScalar(1 + Math.sin(t * 0.9) * 0.03);
   });
 
   return (
     <mesh ref={mesh} position={[0, 0, -0.4]}>
-      <planeGeometry args={[w * 1.9, h * 1.9]} />
+      <planeGeometry args={[w * 1.7, h * 1.7]} />
       <shaderMaterial
         ref={material}
         vertexShader={auraVertex}
@@ -157,48 +243,55 @@ function Aura({ w, h }: { w: number; h: number }) {
   );
 }
 
-/** The reactor video on a clearly lit, fully opaque 3D plane. */
-function VideoPanel({ texture, w, h }: { texture: THREE.Texture; w: number; h: number }) {
+/** The keyed reactor surface, transparent everywhere except the reactor itself. */
+function ReactorPanel({
+  texture,
+  texel,
+  w,
+  h,
+}: {
+  texture: THREE.Texture;
+  texel: THREE.Vector2;
+  w: number;
+  h: number;
+}) {
+  const material = useMemo(
+    () =>
+      new THREE.ShaderMaterial({
+        uniforms: {
+          uMap: { value: texture },
+          uTexel: { value: texel },
+          uTime: { value: 0 },
+          uLow: { value: 0.04 },
+          uHigh: { value: 0.16 },
+          uBump: { value: 4.0 },
+        },
+        vertexShader: reactorVertex,
+        fragmentShader: reactorFragment,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.FrontSide,
+      }),
+    [texture, texel],
+  );
+
+  useFrame((state) => {
+    material.uniforms.uTime.value = state.clock.elapsedTime;
+  });
+
+  useEffect(() => () => material.dispose(), [material]);
+
   return (
-    <mesh position={[0, 0, 0]}>
+    <mesh material={material}>
       <planeGeometry args={[w, h, 1, 1]} />
-      <meshStandardMaterial
-        map={texture}
-        color="#ffffff"
-        roughness={0.55}
-        metalness={0.05}
-        toneMapped={false}
-        side={THREE.FrontSide}
-      />
     </mesh>
   );
 }
 
-/** Coloured key lights add subtle depth while the video stays vivid and legible. */
-function Lights({ mobile }: { mobile: boolean }) {
-  return (
-    <>
-      <ambientLight intensity={1.05} />
-      <pointLight
-        position={[-3.2, 2.6, 4]}
-        color={CYAN}
-        intensity={mobile ? 7 : 12}
-        distance={18}
-        decay={2}
-      />
-      <pointLight
-        position={[3.4, -1.8, 3.6]}
-        color={VIOLET}
-        intensity={mobile ? 6 : 10}
-        distance={18}
-        decay={2}
-      />
-      <directionalLight position={[0, 0.6, 6]} intensity={0.4} color="#bfefff" />
-    </>
-  );
-}
-
-/** Floating, drag-and-hover reactive rig driving the interactive presentation. */
+/**
+ * Very restrained motion: a slow float plus a whisper of pointer parallax.
+ * The plane is not rotated far enough to expose any edge of its source frame.
+ */
 function Rig({ children, interaction }: { children: ReactNode; interaction: RefObject<Interaction> }) {
   const rig = useRef<THREE.Group>(null);
 
@@ -209,16 +302,14 @@ function Rig({ children, interaction }: { children: ReactNode; interaction: RefO
     const damp = (current: number, target: number) =>
       current + (target - current) * (1 - Math.exp(-5 * delta));
 
-    const targetY = clamp(s.dragX + s.hoverX * 0.14, -0.8, 0.8) + Math.sin(t * 0.35) * 0.045;
-    const targetX = clamp(s.dragY - 0.04 - s.hoverY * 0.1, -0.5, 0.5);
+    const targetY = clamp(s.dragX + s.hoverX * 0.05, -0.16, 0.16) + Math.sin(t * 0.3) * 0.015;
+    const targetX = clamp(s.dragY - 0.015 - s.hoverY * 0.04, -0.12, 0.12);
 
     rig.current.rotation.y = damp(rig.current.rotation.y, targetY);
     rig.current.rotation.x = damp(rig.current.rotation.x, targetX);
-    const targetScale = 1 - 0.06 * Math.abs(targetY) - 0.04 * Math.abs(targetX);
-    rig.current.scale.setScalar(damp(rig.current.scale.x, targetScale));
-    rig.current.position.y = Math.sin(t * 0.55) * 0.07;
-    rig.current.position.x = Math.cos(t * 0.38) * 0.035;
-    rig.current.position.z = Math.sin(t * 0.45) * 0.06;
+    rig.current.position.y = Math.sin(t * 0.55) * 0.05;
+    rig.current.position.x = Math.cos(t * 0.38) * 0.025;
+    rig.current.position.z = Math.sin(t * 0.45) * 0.03;
   });
 
   return <group ref={rig}>{children}</group>;
@@ -226,30 +317,26 @@ function Rig({ children, interaction }: { children: ReactNode; interaction: RefO
 
 function SceneContents({
   interaction,
-  mobile,
   onVideoError,
 }: {
   interaction: RefObject<Interaction>;
-  mobile: boolean;
   onVideoError?: () => void;
 }) {
   const { viewport } = useThree();
-  const { texture, aspect } = useVideoTexture(onVideoError);
+  const { texture, aspect, texel } = useVideoTexture(onVideoError);
 
-  const MARGIN = 0.96;
+  // Largest square the actual canvas allows, with a slim safety margin.
+  const MARGIN = 0.92;
   const fitH = viewport.height * MARGIN;
   const fitW = viewport.width * MARGIN;
   const h = Math.min(fitH, fitW / aspect);
   const w = h * aspect;
 
   return (
-    <>
-      <Lights mobile={mobile} />
-      <Rig interaction={interaction}>
-        <Aura w={w} h={h} />
-        {texture ? <VideoPanel texture={texture} w={w} h={h} /> : null}
-      </Rig>
-    </>
+    <Rig interaction={interaction}>
+      <Aura w={w} h={h} />
+      {texture ? <ReactorPanel texture={texture} texel={texel} w={w} h={h} /> : null}
+    </Rig>
   );
 }
 
@@ -293,8 +380,8 @@ export default function CoreScene({
         const dy = e.clientY - s.lastY;
         s.lastX = e.clientX;
         s.lastY = e.clientY;
-        s.dragX = clamp(s.dragX + dx * 0.006, -0.7, 0.7);
-        s.dragY = clamp(s.dragY + dy * 0.006, -0.45, 0.45);
+        s.dragX = clamp(s.dragX + dx * 0.0015, -0.14, 0.14);
+        s.dragY = clamp(s.dragY + dy * 0.0015, -0.1, 0.1);
       } else {
         s.hoverX = (e.clientX / window.innerWidth) * 2 - 1;
         s.hoverY = (e.clientY / window.innerHeight) * 2 - 1;
@@ -338,7 +425,7 @@ export default function CoreScene({
   return (
     <Canvas
       frameloop={onScreen && visible ? "always" : "never"}
-      dpr={[1, isMobile ? 1.5 : 1.9]}
+      dpr={[1, isMobile ? 1.5 : 1.75]}
       camera={{ position: [0, 0, 6.2], fov: 42 }}
       gl={{ antialias: !isMobile, alpha: true, powerPreference: "high-performance" }}
       onCreated={({ gl }) => {
@@ -354,7 +441,7 @@ export default function CoreScene({
         setCanvasEl(gl.domElement);
       }}
     >
-      <SceneContents interaction={interaction} mobile={isMobile} onVideoError={onVideoError} />
+      <SceneContents interaction={interaction} onVideoError={onVideoError} />
     </Canvas>
   );
 }
