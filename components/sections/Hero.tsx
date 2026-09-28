@@ -109,10 +109,8 @@ export function Hero() {
           </motion.div>
         </motion.div>
 
-        <div className="relative z-10 h-[44vh] min-h-[320px] w-full sm:h-[52vh] lg:h-[76vh]">
-          <div className="absolute inset-0 [mask-image:radial-gradient(circle_at_50%_50%,black_66%,transparent_96%)]">
-            <CoreCanvas />
-          </div>
+        <div className="relative z-10 h-[46vh] min-h-[340px] w-full sm:h-[56vh] lg:h-[80vh]">
+          <CoreCanvas />
         </div>
       </div>
 

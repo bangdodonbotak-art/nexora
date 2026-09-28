@@ -4,6 +4,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import * as THREE from "three";
 
+const VIDEO_SRC = "/nexora-reactor.mp4";
 const CYAN = "#00f0ff";
 const VIOLET = "#7000ff";
 const DEFAULT_ASPECT = 788 / 1400;
@@ -41,56 +42,75 @@ const auraFragment = /* glsl */ `
     float halo = pow(core, 2.2);
     float pulse = 0.5 + 0.5 * sin(uTime * 0.9);
     vec3 col = mix(uColorB, uColorA, clamp(core * 1.3, 0.0, 1.0));
-    float alpha = halo * (0.3 + 0.26 * pulse);
+    float alpha = halo * (0.32 + 0.26 * pulse);
     gl_FragColor = vec4(col, alpha);
   }
 `;
 
-/** Loads the reactor render once and reports its aspect ratio and texel size. */
-function useReactorTexture() {
-  const [state, setState] = useState<{
-    texture: THREE.Texture | null;
-    aspect: number;
-    texel: THREE.Vector2;
-  }>({
+/**
+ * Streams the reactor video into a GPU texture, keeping a stable aspect ratio
+ * and surfacing load failures so the caller can fall back gracefully.
+ */
+function useVideoTexture(onError?: () => void) {
+  const [state, setState] = useState<{ texture: THREE.VideoTexture | null; aspect: number }>({
     texture: null,
     aspect: DEFAULT_ASPECT,
-    texel: new THREE.Vector2(1 / 788, 1 / 1400),
   });
-  const ref = useRef<THREE.Texture | null>(null);
+  const errorRef = useRef(onError);
+  errorRef.current = onError;
 
   useEffect(() => {
+    const video = document.createElement("video");
+    video.src = VIDEO_SRC;
+    video.crossOrigin = "anonymous";
+    video.loop = true;
+    video.muted = true;
+    video.defaultMuted = true;
+    video.autoplay = true;
+    video.preload = "auto";
+    video.setAttribute("playsinline", "");
+    video.setAttribute("webkit-playsinline", "");
+    video.setAttribute("muted", "");
+
     let active = true;
-    const small = typeof window !== "undefined" && window.innerWidth < 768;
-    const loader = new THREE.TextureLoader();
-    loader.load(
-      small ? "/reactor-720.webp" : "/reactor.webp",
-      (t) => {
-        if (!active) {
-          t.dispose();
-          return;
-        }
-        t.colorSpace = THREE.SRGBColorSpace;
-        t.minFilter = THREE.LinearMipmapLinearFilter;
-        t.magFilter = THREE.LinearFilter;
-        t.generateMipmaps = true;
-        t.anisotropy = 4;
-        t.needsUpdate = true;
-        ref.current = t;
-        const image = t.image as { width: number; height: number };
-        setState({
-          texture: t,
-          aspect: image.width / image.height,
-          texel: new THREE.Vector2(1 / image.width, 1 / image.height),
-        });
-      },
-      undefined,
-      () => {},
-    );
+    let texture: THREE.VideoTexture | null = null;
+
+    const ready = () => {
+      if (!active || texture) return;
+      const aspect =
+        video.videoWidth && video.videoHeight
+          ? video.videoWidth / video.videoHeight
+          : DEFAULT_ASPECT;
+      texture = new THREE.VideoTexture(video);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.generateMipmaps = false;
+      setState({ texture, aspect });
+    };
+
+    const failed = () => {
+      if (!active) return;
+      errorRef.current?.();
+    };
+
+    video.addEventListener("loadeddata", ready);
+    video.addEventListener("canplay", ready);
+    video.addEventListener("error", failed);
+    video.load();
+
+    const playPromise = video.play();
+    if (playPromise && typeof playPromise.catch === "function") playPromise.catch(() => {});
+
     return () => {
       active = false;
-      ref.current?.dispose();
-      ref.current = null;
+      video.removeEventListener("loadeddata", ready);
+      video.removeEventListener("canplay", ready);
+      video.removeEventListener("error", failed);
+      video.pause();
+      video.removeAttribute("src");
+      video.load();
+      texture?.dispose();
     };
   }, []);
 
@@ -123,7 +143,7 @@ function Aura({ w, h }: { w: number; h: number }) {
 
   return (
     <mesh ref={mesh} position={[0, 0, -0.4]}>
-      <planeGeometry args={[w * 2.1, h * 2.1]} />
+      <planeGeometry args={[w * 1.9, h * 1.9]} />
       <shaderMaterial
         ref={material}
         vertexShader={auraVertex}
@@ -137,118 +157,48 @@ function Aura({ w, h }: { w: number; h: number }) {
   );
 }
 
-/**
- * The reactor image, displaced into a depth relief on the GPU. Luminance drives
- * vertex height, neighbouring texels derive real normals, and the mesh is lit by
- * coloured lights so the relief reads as a solid, interactive 3D object.
- */
-function ReactorRelief({
-  texture,
-  texel,
-  w,
-  h,
-  mobile,
-}: {
-  texture: THREE.Texture;
-  texel: THREE.Vector2;
-  w: number;
-  h: number;
-  mobile: boolean;
-}) {
-  const geometry = useMemo(() => {
-    const segY = mobile ? 150 : 260;
-    const segX = Math.max(2, Math.round(segY * (w / h)));
-    return new THREE.PlaneGeometry(w, h, segX, segY);
-  }, [w, h, mobile]);
-
-  const material = useMemo(() => {
-    const mat = new THREE.MeshLambertMaterial({
-      map: texture,
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      toneMapped: false,
-      side: THREE.FrontSide,
-    });
-
-    mat.onBeforeCompile = (shader) => {
-      shader.uniforms.uHeightMap = { value: texture };
-      shader.uniforms.uTexel = { value: texel };
-      shader.uniforms.uSize = { value: new THREE.Vector2(w, h) };
-      shader.uniforms.uDepth = { value: h * 0.14 };
-
-      shader.vertexShader = shader.vertexShader
-        .replace(
-          "#include <common>",
-          /* glsl */ `#include <common>
-          uniform sampler2D uHeightMap;
-          uniform vec2 uTexel;
-          uniform vec2 uSize;
-          uniform float uDepth;
-          float nexoraHeight(vec2 p) {
-            vec3 c = texture2D(uHeightMap, clamp(p, 0.0, 1.0)).rgb;
-            float l = dot(c, vec3(0.299, 0.587, 0.114));
-            return pow(clamp(l, 0.0, 1.0), 0.85);
-          }`,
-        )
-        .replace(
-          "#include <beginnormal_vertex>",
-          /* glsl */ `vec3 objectNormal = vec3( normal );
-          {
-            float hL = nexoraHeight(uv - vec2(uTexel.x, 0.0));
-            float hR = nexoraHeight(uv + vec2(uTexel.x, 0.0));
-            float hD = nexoraHeight(uv - vec2(0.0, uTexel.y));
-            float hU = nexoraHeight(uv + vec2(0.0, uTexel.y));
-            float dzdx = uDepth * (hR - hL) / (2.0 * uTexel.x * uSize.x);
-            float dzdy = uDepth * (hU - hD) / (2.0 * uTexel.y * uSize.y);
-            objectNormal = normalize(vec3(-dzdx, -dzdy, 1.0));
-          }`,
-        )
-        .replace(
-          "#include <begin_vertex>",
-          /* glsl */ `#include <begin_vertex>
-          transformed.z += nexoraHeight(uv) * uDepth;`,
-        );
-    };
-    mat.customProgramCacheKey = () => "nexora-relief";
-    return mat;
-  }, [texture, texel, w, h]);
-
-  useEffect(() => {
-    return () => {
-      geometry.dispose();
-      material.dispose();
-    };
-  }, [geometry, material]);
-
-  return <mesh material={material} geometry={geometry} />;
+/** The reactor video on a clearly lit, fully opaque 3D plane. */
+function VideoPanel({ texture, w, h }: { texture: THREE.Texture; w: number; h: number }) {
+  return (
+    <mesh position={[0, 0, 0]}>
+      <planeGeometry args={[w, h, 1, 1]} />
+      <meshStandardMaterial
+        map={texture}
+        color="#ffffff"
+        roughness={0.55}
+        metalness={0.05}
+        toneMapped={false}
+        side={THREE.FrontSide}
+      />
+    </mesh>
+  );
 }
 
-/** Coloured key lights give the relief directional shading that shifts with parallax. */
+/** Coloured key lights add subtle depth while the video stays vivid and legible. */
 function Lights({ mobile }: { mobile: boolean }) {
   return (
     <>
-      <ambientLight intensity={0.72} />
+      <ambientLight intensity={1.05} />
       <pointLight
         position={[-3.2, 2.6, 4]}
         color={CYAN}
-        intensity={mobile ? 9 : 15}
-        distance={16}
+        intensity={mobile ? 7 : 12}
+        distance={18}
         decay={2}
       />
       <pointLight
         position={[3.4, -1.8, 3.6]}
         color={VIOLET}
-        intensity={mobile ? 8 : 13}
-        distance={16}
+        intensity={mobile ? 6 : 10}
+        distance={18}
         decay={2}
       />
-      <directionalLight position={[0, 0.6, 6]} intensity={0.55} color="#bfefff" />
+      <directionalLight position={[0, 0.6, 6]} intensity={0.4} color="#bfefff" />
     </>
   );
 }
 
-/** Floating, drag-and-hover reactive rig driving the interactive 3D presentation. */
+/** Floating, drag-and-hover reactive rig driving the interactive presentation. */
 function Rig({ children, interaction }: { children: ReactNode; interaction: RefObject<Interaction> }) {
   const rig = useRef<THREE.Group>(null);
 
@@ -275,15 +225,17 @@ function Rig({ children, interaction }: { children: ReactNode; interaction: RefO
 function SceneContents({
   interaction,
   mobile,
+  onVideoError,
 }: {
   interaction: RefObject<Interaction>;
   mobile: boolean;
+  onVideoError?: () => void;
 }) {
   const { viewport } = useThree();
-  const { texture, aspect, texel } = useReactorTexture();
+  const { texture, aspect } = useVideoTexture(onVideoError);
 
-  const fitH = viewport.height * 0.84;
-  const fitW = viewport.width * 0.88;
+  const fitH = viewport.height * 0.86;
+  const fitW = viewport.width * 0.9;
   const h = Math.min(fitH, fitW / aspect);
   const w = h * aspect;
 
@@ -292,15 +244,19 @@ function SceneContents({
       <Lights mobile={mobile} />
       <Rig interaction={interaction}>
         <Aura w={w} h={h} />
-        {texture ? (
-          <ReactorRelief texture={texture} texel={texel} w={w} h={h} mobile={mobile} />
-        ) : null}
+        {texture ? <VideoPanel texture={texture} w={w} h={h} /> : null}
       </Rig>
     </>
   );
 }
 
-export default function CoreScene({ onContextLost }: { onContextLost?: () => void }) {
+export default function CoreScene({
+  onContextLost,
+  onVideoError,
+}: {
+  onContextLost?: () => void;
+  onVideoError?: () => void;
+}) {
   const [canvasEl, setCanvasEl] = useState<HTMLCanvasElement | null>(null);
   const [onScreen, setOnScreen] = useState(true);
   const [visible, setVisible] = useState(true);
@@ -395,7 +351,7 @@ export default function CoreScene({ onContextLost }: { onContextLost?: () => voi
         setCanvasEl(gl.domElement);
       }}
     >
-      <SceneContents interaction={interaction} mobile={isMobile} />
+      <SceneContents interaction={interaction} mobile={isMobile} onVideoError={onVideoError} />
     </Canvas>
   );
 }
