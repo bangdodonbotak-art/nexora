@@ -214,6 +214,8 @@ function Rig({ children, interaction }: { children: ReactNode; interaction: RefO
 
     rig.current.rotation.y = damp(rig.current.rotation.y, targetY);
     rig.current.rotation.x = damp(rig.current.rotation.x, targetX);
+    const targetScale = 1 - 0.06 * Math.abs(targetY) - 0.04 * Math.abs(targetX);
+    rig.current.scale.setScalar(damp(rig.current.scale.x, targetScale));
     rig.current.position.y = Math.sin(t * 0.55) * 0.07;
     rig.current.position.x = Math.cos(t * 0.38) * 0.035;
     rig.current.position.z = Math.sin(t * 0.45) * 0.06;
@@ -234,8 +236,9 @@ function SceneContents({
   const { viewport } = useThree();
   const { texture, aspect } = useVideoTexture(onVideoError);
 
-  const fitH = viewport.height * 0.92;
-  const fitW = viewport.width * 0.94;
+  const MARGIN = 0.96;
+  const fitH = viewport.height * MARGIN;
+  const fitW = viewport.width * MARGIN;
   const h = Math.min(fitH, fitW / aspect);
   const w = h * aspect;
 
