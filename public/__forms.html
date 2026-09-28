@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>NEXORA access request</title>
+    <meta name="robots" content="noindex" />
+  </head>
+  <body>
+    <!-- Static skeleton so Netlify's build bot can register the form used by the app. -->
+    <form name="nexora-access" method="POST" data-netlify="true" netlify-honeypot="bot-field" hidden>
+      <input type="hidden" name="form-name" value="nexora-access" />
+      <input name="email" type="email" />
+      <input name="company" type="text" />
+      <select name="modality">
+        <option>LLM</option>
+        <option>Vision &amp; OCR</option>
+        <option>Audio &amp; Voice</option>
+        <option>Video</option>
+        <option>3D &amp; Spatial</option>
+        <option>Agents</option>
+      </select>
+      <textarea name="use_case"></textarea>
+      <input name="bot-field" />
+    </form>
+  </body>
+</html>
